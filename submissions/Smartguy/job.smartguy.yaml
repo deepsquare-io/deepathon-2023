@@ -1,0 +1,129 @@
+# yaml-language-server: $schema=C:\Users\Franz\AppData\Local\.job.schema.json
+## See: https://docs.deepsquare.run/workflow/workflow-api-reference/job
+
+## Enable DeepSquare logging
+enableLogging: true
+
+## Allocate resources
+resources:
+  tasks: 1
+  cpusPerTask: 3
+  memPerCpu: 2048
+  gpus: 0
+
+## Environment variables
+env:
+  - key: "DB_ROOT_PASSWORD"
+    value: "default"
+  - key: "DB_NAME"
+    value: "document_management"
+  - key: "DB_USER"
+    value: "test"
+  - key: "DB_PASS"
+    value: "default"
+  - key: "APP_ENV"
+    value: "development"
+
+steps:
+  - name: Run Application and Nginx Web Server
+    run:
+      mapUid: 0
+      mapGid: 0
+      command: |
+        mkdir /run/mysqld
+        chown mysql:mysql /run/mysqld
+        /usr/sbin/service mysql start
+        while ! nc -zv localhost 3306; do
+            sleep 10
+            cat /var/log/mysql/error.log
+            echo "Waiting for MariaDB to be up..."
+        done
+        # Create database and users table
+        mysql -u root -p$DB_ROOT_PASSWORD -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+        mysql -u root -p$DB_ROOT_PASSWORD -e "USE $DB_NAME; CREATE TABLE IF NOT EXISTS users (username VARCHAR(50), password VARCHAR(50), role VARCHAR(50), color VARCHAR(10));"
+        mysql -u root -p$DB_ROOT_PASSWORD -e "USE $DB_NAME; INSERT INTO users (username, password, role, color) VALUES ('admin', 'adminpass', 'Administrator', 'red'), ('editor', 'editorpass', 'Editor', 'green'), ('viewer', 'viewerpass', 'Viewer', 'blue');"
+        mysql -u root -p$DB_ROOT_PASSWORD -e "CREATE USER 'test'@'localhost' IDENTIFIED BY '$DB_ROOT_PASSWORD';"
+        mysql -u root -p$DB_ROOT_PASSWORD -e "GRANT ALL PRIVILEGES ON document_management.* TO 'test'@'localhost';"
+        mysql -u root -p$DB_ROOT_PASSWORD -e "FLUSH PRIVILEGES;"
+
+        # Node.js Application Setup
+        echo "const express = require('express');
+        const mysql = require('mysql2');
+        const app = express();
+        app.use(express.urlencoded({ extended: true }));
+
+        const db = mysql.createConnection({
+          host: 'localhost',
+          user: 'test',
+          password: 'default',
+          database: 'document_management'
+        });
+
+        db.connect((err) => {
+          if (err) throw err;
+          console.log('Connected to database');
+        });
+
+        app.get('/', (req, res) => {
+          res.send('<form method=\"post\">Username: <input type=\"text\" name=\"username\"/><br/>Password: <input type=\"password\" name=\"password\"/><br/><input type=\"submit\" value=\"Login\"/></form>');
+        });
+
+        app.post('/', (req, res) => {
+          const username = req.body.username;
+          const password = req.body.password;
+          db.query('SELECT role, color FROM users WHERE username = ? AND password = ?', [username, password], (err, results) => {
+            if (err) throw err;
+            if (results.length > 0) {
+              const user = results[0];
+              res.send(\`<div style='color: \${user.color};'>Logged in as \${user.role}</div>\`);
+            } else {
+              res.send('Invalid username or password');
+            }
+          });
+        });
+
+        app.listen(3000, () => {
+          console.log('Server running at http://localhost:3000');
+        });
+        " > server.js
+
+        # Install express and mysql for Node.js
+        npm install express mysql2
+
+        # Run the Node.js application
+        node server.js &
+
+        # Setup and start Nginx
+        echo "worker_processes  1;" > /etc/nginx/nginx.conf
+        echo "events {" >> /etc/nginx/nginx.conf
+        echo "    worker_connections  1024;" >> /etc/nginx/nginx.conf
+        echo "}" >> /etc/nginx/nginx.conf
+        echo "http {" >> /etc/nginx/nginx.conf
+        echo "    include       mime.types;" >> /etc/nginx/nginx.conf
+        echo "    default_type  application/octet-stream;" >> /etc/nginx/nginx.conf
+        echo "    sendfile        on;" >> /etc/nginx/nginx.conf
+        echo "    keepalive_timeout  65;" >> /etc/nginx/nginx.conf
+        echo "    server {" >> /etc/nginx/nginx.conf
+        echo "        listen       8080;" >> /etc/nginx/nginx.conf
+        echo "        server_name  localhost;" >> /etc/nginx/nginx.conf
+        echo "        location / {" >> /etc/nginx/nginx.conf
+        echo "            proxy_pass http://localhost:3000;" >> /etc/nginx/nginx.conf
+        echo "            proxy_http_version 1.1;" >> /etc/nginx/nginx.conf
+        echo "            proxy_set_header Upgrade \$http_upgrade;" >> /etc/nginx/nginx.conf
+        echo "            proxy_set_header Connection 'upgrade';" >> /etc/nginx/nginx.conf
+        echo "            proxy_set_header Host \$host;" >> /etc/nginx/nginx.conf
+        echo "            proxy_cache_bypass \$http_upgrade;" >> /etc/nginx/nginx.conf
+        echo "        }" >> /etc/nginx/nginx.conf
+        echo "    }" >> /etc/nginx/nginx.conf
+        echo "}" >> /etc/nginx/nginx.conf
+        # Install and start the dpsproxy for Bore tunneling
+        curl -fsSL https://github.com/deepsquare-io/proxy/releases/download/v0.2.2/dpsproxy-linux-amd64 -o /usr/bin/dpsproxy
+        chmod +x /usr/bin/dpsproxy
+        /usr/bin/dpsproxy --to.addr bore.deepsquare.run:2200 --local.addr localhost:8080 -r &
+
+        # Run Nginx in the foreground
+        /usr/sbin/nginx -g "daemon off;"
+      container:
+        image: franzouille/node-mariadb-nginx:latest
+      # needed to guarantee isolation
+      network: slirp4netns
