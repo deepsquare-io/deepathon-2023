@@ -19,8 +19,8 @@ Observe the color change depending on the user you are connected to ! This is a 
 ## Improvements : 
 For such app, you could for example :
 1. make it stateless
-2. use a cloud provider (e.g. Amazon RDS, DynamoDB)
-3. use AWS SDK for S3 to interact with S3 buckets to operform operations using S3 APIs
+2. use a cloud provider DB solution (e.g. Amazon RDS, DynamoDB)
+3. use AWS SDK for S3 to interact with S3 buckets to perform operations using S3 APIs
 4. use your own S3 solution (e.g. Ceph)
 
 Assuming you have a JSON file with user data structured like this :
